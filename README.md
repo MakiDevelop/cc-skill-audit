@@ -2,6 +2,8 @@
 
 > Security scanner & PreToolUse firewall for Claude Code third-party skills.
 
+[繁體中文 README](README.zh-TW.md)
+
 Detects undisclosed telemetry, outbound data exfiltration, and suspicious patterns **before** you install a third-party skill.
 
 Born from a [real incident](https://blog.chibakuma.com/ai-audit-gstack-telemetry-2/) where a popular Claude Code skill pack was found to silently log project names — even with telemetry set to "off."
