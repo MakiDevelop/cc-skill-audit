@@ -1,0 +1,346 @@
+#!/usr/bin/env bash
+# cc-skill-audit — Security scanner for Claude Code third-party skills
+#
+# Usage:
+#   cc-skill-audit /path/to/skill          # full scan, human-readable report
+#   cc-skill-audit /path/to/skill --json   # machine-readable JSON output
+#   cc-skill-audit /path/to/skill --fast   # quick scan for hook (exit code only)
+#
+# Exit codes (--fast mode):
+#   0 = GREEN (safe)
+#   1 = YELLOW (caution)
+#   2 = RED (suspicious)
+#   3 = error
+#
+# Dependencies: grep, find, awk, sed (standard POSIX)
+# Optional: jq (for --json output)
+
+set -uo pipefail
+
+VERSION="0.1.0"
+
+# ─── Args ────────────────────────────────────────────────────
+TARGET=""
+MODE="full"  # full | fast | json
+
+for arg in "$@"; do
+  case "$arg" in
+    --fast)    MODE="fast" ;;
+    --json)    MODE="json" ;;
+    --version) echo "cc-skill-audit $VERSION"; exit 0 ;;
+    --help|-h)
+      echo "Usage: cc-skill-audit <skill-directory> [--fast|--json|--version]"
+      exit 0
+      ;;
+    -*)
+      echo "Unknown option: $arg" >&2
+      exit 3
+      ;;
+    *)
+      [ -z "$TARGET" ] && TARGET="$arg"
+      ;;
+  esac
+done
+
+if [ -z "$TARGET" ]; then
+  echo "Error: no skill directory specified" >&2
+  echo "Usage: cc-skill-audit <skill-directory> [--fast|--json]" >&2
+  exit 3
+fi
+
+# Resolve path
+TARGET="${TARGET/#\~/$HOME}"
+TARGET="${TARGET//\$HOME/$HOME}"
+TARGET="${TARGET//\$\{HOME\}/$HOME}"
+if [ "${TARGET#/}" = "$TARGET" ]; then
+  TARGET="$(pwd)/$TARGET"
+fi
+
+if [ ! -d "$TARGET" ]; then
+  echo "Error: not a directory: $TARGET" >&2
+  exit 3
+fi
+
+SKILL_NAME="$(basename "$TARGET")"
+
+# ─── Inventory files ─────────────────────────────────────────
+FILES_TMP=$(mktemp /tmp/cc-skill-audit.files.XXXXXX 2>/dev/null)
+if [ -z "$FILES_TMP" ] || [ ! -f "$FILES_TMP" ]; then
+  echo "Error: failed to create temp file" >&2
+  exit 3
+fi
+trap 'rm -f "$FILES_TMP"' EXIT
+SCAN_ERRORS=0
+
+find "$TARGET" \
+  \( -path '*/.git' -o -path '*/node_modules' -o -path '*/dist' -o -path '*/build' -o -path '*/coverage' \) -prune -o \
+  -type f -print0 2>/dev/null | tr '\0' '\n' > "$FILES_TMP"
+
+FILE_COUNT=$(wc -l < "$FILES_TMP" | tr -d ' ')
+if [ "$FILE_COUNT" -eq 0 ]; then
+  echo "Error: no files found in $TARGET" >&2
+  exit 3
+fi
+
+# Limit scan scope for --fast mode
+MAX_FILES=500
+if [ "$MODE" = "fast" ]; then
+  MAX_FILES=250
+fi
+if [ "$FILE_COUNT" -gt "$MAX_FILES" ]; then
+  head -n "$MAX_FILES" "$FILES_TMP" > "${FILES_TMP}.limited"
+  mv "${FILES_TMP}.limited" "$FILES_TMP"
+  TRUNCATED=true
+else
+  TRUNCATED=false
+fi
+
+# ─── Scan functions ──────────────────────────────────────────
+safe_grep() {
+  local pattern="$1"
+  local max_lines="${2:-50}"
+  local result
+  result=$(while IFS= read -r file; do
+    [ -f "$file" ] && grep -nE "$pattern" -- "$file" 2>/dev/null || true
+  done < "$FILES_TMP" | head -n "$max_lines")
+  if [ $? -ne 0 ] && [ $? -ne 1 ]; then
+    SCAN_ERRORS=$((SCAN_ERRORS + 1))
+  fi
+  echo "$result"
+}
+
+# 1. Telemetry keywords
+TELEMETRY_PATTERN='telemetry|analytics|supabase|firebase|segment\.io|sentry|phone[._-]?home|beacon|metrics[._-]?(log|sync|send|upload|post)'
+TELEMETRY_HITS=$(safe_grep "$TELEMETRY_PATTERN" 30)
+
+# 2. Network calls
+NETWORK_PATTERN='https?://|curl[[:space:]]|wget[[:space:]]|fetch[[:space:]]*\(|axios([.(]|[[:space:]])|XMLHttpRequest|sendBeacon|WebSocket|\.post\(|\.put\('
+NETWORK_HITS=$(safe_grep "$NETWORK_PATTERN" 30)
+
+# 3. URL extraction
+URLS=""
+if [ -n "$NETWORK_HITS" ]; then
+  URLS=$(xargs grep -hoE 'https?://[^"'"'"' )>]+' < "$FILES_TMP" 2>/dev/null \
+    | sed 's/[",)\].]*$//' \
+    | sort -u \
+    | head -n 30 || true)
+fi
+
+DOMAINS=""
+if [ -n "$URLS" ]; then
+  DOMAINS=$(echo "$URLS" | awk -F/ '{print $3}' | sed 's/:.*$//' | sort -u)
+fi
+
+# 4. Opt-in / consent signals
+OPTIN_PATTERN='opt[_-]?in|consent|enable[_-]?telemetry|disable[_-]?telemetry|telemetry[^[:alnum:]]*(false|off|disabled|none)|analytics[^[:alnum:]]*(false|off|disabled)'
+OPTIN_HITS=$(safe_grep "$OPTIN_PATTERN" 10)
+
+# 5. Dotfile / state directory creation (works on macOS + Linux)
+DOTFILE_PATTERN='(mkdir|touch|tee|cat|echo|printf|cp|mv|ln|writeFile|appendFile|fs\.write)[^#]*((\~|\$HOME|\$\{HOME\})/\.|/Users/[^/]+/\.|/home/[^/]+/\.)'
+DOTFILE_HITS=$(safe_grep "$DOTFILE_PATTERN" 20)
+
+# 6. Sensitive path access
+SENSITIVE_PATTERN='\.git/config|[~\$].*\.ssh|\.gnupg|\.env([[:space:]"'"'"'/:\.]|$)|id_rsa|id_ed25519|known_hosts|\.npmrc|\.pypirc|\.netrc'
+SENSITIVE_HITS=$(safe_grep "$SENSITIVE_PATTERN" 20)
+
+# 7. Hardcoded API keys / tokens
+KEY_PATTERN='ghp_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|sb_[A-Za-z0-9_-]{20,}|xox[bpsa]-[A-Za-z0-9-]+'
+KEY_HITS=$(safe_grep "$KEY_PATTERN" 10)
+
+# 8. Data fields that might be collected
+FIELD_PATTERN='repo|repository|branch|commit|diff|prompt|conversation|transcript|cwd|hostname|username|email|project|session[_-]?id'
+FIELD_HITS=$(safe_grep "$FIELD_PATTERN" 20)
+
+# ─── Risk classification ─────────────────────────────────────
+RISK="GREEN"
+REASONS=""
+
+add_reason() {
+  if [ -z "$REASONS" ]; then
+    REASONS="$1"
+  else
+    REASONS="$REASONS; $1"
+  fi
+}
+
+# RED triggers
+if [ -n "$KEY_HITS" ]; then
+  RISK="RED"
+  add_reason "hardcoded API keys/tokens found"
+fi
+
+if [ -n "$SENSITIVE_HITS" ]; then
+  RISK="RED"
+  add_reason "reads sensitive paths (.ssh, .env, .gnupg)"
+fi
+
+if [ -n "$DOTFILE_HITS" ]; then
+  if [ "$RISK" != "RED" ]; then RISK="RED"; fi
+  add_reason "creates dotfiles/state outside skill directory"
+fi
+
+if [ -n "$TELEMETRY_HITS" ] && [ -n "$NETWORK_HITS" ] && [ -z "$OPTIN_HITS" ]; then
+  RISK="RED"
+  add_reason "telemetry + network calls without opt-in mechanism"
+fi
+
+# YELLOW triggers (only upgrade from GREEN)
+if [ "$RISK" = "GREEN" ]; then
+  if [ -n "$TELEMETRY_HITS" ] && [ -n "$OPTIN_HITS" ]; then
+    RISK="YELLOW"
+    add_reason "telemetry exists but appears opt-in"
+  elif [ -n "$TELEMETRY_HITS" ] && [ -z "$NETWORK_HITS" ]; then
+    RISK="YELLOW"
+    add_reason "telemetry keywords found but no outbound network calls"
+  elif [ -n "$NETWORK_HITS" ] && [ -z "$TELEMETRY_HITS" ]; then
+    RISK="YELLOW"
+    add_reason "network calls found (may be legitimate API usage)"
+  fi
+fi
+
+if [ "$RISK" = "GREEN" ] && [ "$TRUNCATED" = true ]; then
+  RISK="YELLOW"
+  add_reason "scan truncated ($MAX_FILES file limit) — manual review recommended"
+fi
+
+# Fail-safe: scan errors should never produce GREEN
+if [ "$RISK" = "GREEN" ] && [ "$SCAN_ERRORS" -gt 0 ]; then
+  RISK="YELLOW"
+  add_reason "scan completed with $SCAN_ERRORS error(s) — manual review recommended"
+fi
+
+[ -z "$REASONS" ] && REASONS="no suspicious patterns detected"
+
+# ─── Output ──────────────────────────────────────────────────
+
+# Map risk to recommendation
+case "$RISK" in
+  GREEN)  RECOMMENDATION="install" ;;
+  YELLOW) RECOMMENDATION="install-with-caution" ;;
+  RED)    RECOMMENDATION="do-not-install" ;;
+esac
+
+# Telemetry type inference
+TELEMETRY_FOUND="no"
+TELEMETRY_TYPE="none"
+TELEMETRY_OPTIN="n/a"
+TELEMETRY_BACKEND="none"
+
+if [ -n "$TELEMETRY_HITS" ]; then
+  TELEMETRY_FOUND="yes"
+  if [ -n "$NETWORK_HITS" ]; then
+    TELEMETRY_TYPE="remote-sync"
+  else
+    TELEMETRY_TYPE="local-only"
+  fi
+  if [ -n "$OPTIN_HITS" ]; then
+    TELEMETRY_OPTIN="yes"
+  else
+    TELEMETRY_OPTIN="no"
+  fi
+  if [ -n "$DOMAINS" ]; then
+    TELEMETRY_BACKEND=$(echo "$DOMAINS" | head -n 3 | tr '\n' ', ' | sed 's/,$//')
+  fi
+fi
+
+# Sensitive fields
+SENSITIVE_FIELDS="none"
+if [ -n "$FIELD_HITS" ]; then
+  SENSITIVE_FIELDS=$(echo "$FIELD_HITS" | grep -oE '(repo|repository|branch|commit|prompt|conversation|transcript|session[_-]?id|cwd|hostname|username|email|project)' | sort -u | tr '\n' ', ' | sed 's/,$//')
+  [ -z "$SENSITIVE_FIELDS" ] && SENSITIVE_FIELDS="none"
+fi
+
+# Dotfile list
+DOTFILE_PATHS="none"
+if [ -n "$DOTFILE_HITS" ]; then
+  DOTFILE_PATHS=$(echo "$DOTFILE_HITS" | grep -oE '(~/\.[^ "'"'"']+|\$HOME/\.[^ "'"'"']+|\$\{HOME\}/\.[^ "'"'"']+|/Users/[^/]+/\.[^ "'"'"']+|/home/[^/]+/\.[^ "'"'"']+)' | sort -u | head -n 10 | tr '\n' ', ' | sed 's/,$//')
+  [ -z "$DOTFILE_PATHS" ] && DOTFILE_PATHS="(detected but paths unclear)"
+fi
+
+# Sensitive reads
+SENSITIVE_READS="none"
+if [ -n "$SENSITIVE_HITS" ]; then
+  SENSITIVE_READS=$(echo "$SENSITIVE_HITS" | grep -oE '(\.git/config|\.ssh|\.gnupg|\.env|id_rsa|id_ed25519|known_hosts|\.npmrc|\.pypirc|\.netrc)' | sort -u | tr '\n' ', ' | sed 's/,$//')
+  [ -z "$SENSITIVE_READS" ] && SENSITIVE_READS="(detected but specifics unclear)"
+fi
+
+# Domain list
+DOMAIN_LIST="none"
+if [ -n "$DOMAINS" ]; then
+  DOMAIN_LIST=$(echo "$DOMAINS" | tr '\n' ', ' | sed 's/,$//')
+fi
+
+HAS_KEYS="no"
+[ -n "$KEY_HITS" ] && HAS_KEYS="yes"
+
+# ─── Fast mode: exit code only ───────────────────────────────
+if [ "$MODE" = "fast" ]; then
+  case "$RISK" in
+    GREEN)  exit 0 ;;
+    YELLOW) exit 1 ;;
+    RED)    exit 2 ;;
+  esac
+fi
+
+# ─── JSON mode ───────────────────────────────────────────────
+if [ "$MODE" = "json" ]; then
+  cat <<ENDJSON
+{
+  "skill": "$SKILL_NAME",
+  "risk": "$RISK",
+  "recommendation": "$RECOMMENDATION",
+  "reasons": "$REASONS",
+  "telemetry": {
+    "found": "$TELEMETRY_FOUND",
+    "type": "$TELEMETRY_TYPE",
+    "opt_in": "$TELEMETRY_OPTIN",
+    "backend": "$TELEMETRY_BACKEND"
+  },
+  "network": {
+    "domains": "$DOMAIN_LIST",
+    "hardcoded_keys": "$HAS_KEYS"
+  },
+  "filesystem": {
+    "creates_dotfiles": "$DOTFILE_PATHS",
+    "reads_sensitive": "$SENSITIVE_READS"
+  },
+  "data_fields": "$SENSITIVE_FIELDS",
+  "files_scanned": $FILE_COUNT,
+  "truncated": $TRUNCATED,
+  "version": "$VERSION"
+}
+ENDJSON
+  exit 0
+fi
+
+# ─── Full report ─────────────────────────────────────────────
+cat <<ENDREPORT
+## Skill Audit Report: $SKILL_NAME
+
+### Risk Level: $RISK
+
+### Telemetry
+- Found: $TELEMETRY_FOUND
+- Type: $TELEMETRY_TYPE
+- Opt-in: $TELEMETRY_OPTIN
+- Backend: $TELEMETRY_BACKEND
+
+### Data Collection
+- Fields: $SENSITIVE_FIELDS
+- Sensitive: $([ -n "$SENSITIVE_HITS" ] && echo "yes" || echo "none detected")
+
+### Network
+- Outbound domains: $DOMAIN_LIST
+- Hardcoded keys: $HAS_KEYS
+
+### File System
+- Creates dotfiles: $DOTFILE_PATHS
+- Reads sensitive paths: $SENSITIVE_READS
+
+### Recommendation
+$RECOMMENDATION
+
+---
+Scanned $FILE_COUNT files$([ "$TRUNCATED" = true ] && echo " (truncated at $MAX_FILES)") | cc-skill-audit v$VERSION
+Reasons: $REASONS
+ENDREPORT
