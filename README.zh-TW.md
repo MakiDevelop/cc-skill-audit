@@ -23,7 +23,7 @@ cc-skill-audit 是一個簡單、純本地、零依賴的工具,在你安裝 ski
 ## 快速開始
 
 ```bash
-git clone https://github.com/maki-tw/cc-skill-audit.git
+git clone https://github.com/MakiDevelop/cc-skill-audit.git
 cd cc-skill-audit
 ./install.sh
 ```

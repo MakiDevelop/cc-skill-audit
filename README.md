@@ -2,6 +2,10 @@
 
 > Security scanner & PreToolUse firewall for Claude Code third-party skills.
 
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+![Shell](https://img.shields.io/badge/language-Shell-blue)
+![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)
+
 [繁體中文 README](README.zh-TW.md)
 
 Detects undisclosed telemetry, outbound data exfiltration, and suspicious patterns **before** you install a third-party skill.
@@ -23,7 +27,7 @@ cc-skill-audit is a simple, local-only, zero-dependency tool that scans skills f
 ## Quick Start
 
 ```bash
-git clone https://github.com/maki-tw/cc-skill-audit.git
+git clone https://github.com/MakiDevelop/cc-skill-audit.git
 cd cc-skill-audit
 ./install.sh
 ```
