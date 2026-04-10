@@ -116,9 +116,9 @@ if [ "$LIST_STATUS" = "blocked" ]; then
     exit 2
   elif [ "$MODE" = "json" ]; then
     python3 -c "
-import json
-print(json.dumps({'skill': '$SKILL_NAME', 'risk': 'RED', 'score': 100, 'recommendation': 'do-not-install', 'reasons': 'skill is on the blocklist', 'version': '$VERSION'}, indent=2))
-"
+import json, sys
+print(json.dumps({'skill': sys.argv[1], 'risk': 'RED', 'score': 100, 'recommendation': 'do-not-install', 'reasons': 'skill is on the blocklist', 'version': sys.argv[2]}, indent=2))
+" "$SKILL_NAME" "$VERSION"
     exit 0
   else
     echo "## Skill Audit Report: $SKILL_NAME"
@@ -621,8 +621,8 @@ print(json.dumps(data, indent=2, ensure_ascii=False))
     "$TELEMETRY_FOUND" "$TELEMETRY_TYPE" "$TELEMETRY_OPTIN" "$TELEMETRY_BACKEND" \
     "$DOMAIN_LIST" "$HAS_KEYS" \
     "$DOTFILE_PATHS" "$SENSITIVE_READS" \
-    "$BASE64_HITS" "$CONCAT_HITS" "$HEX_HITS" "$DYN_REQUIRE_HITS" "$ENTROPY_HITS" "$OBFUSCATION_COUNT" \
-    "$BINARY_HITS" "$EXECUTABLE_HITS" \
+    "${BASE64_HITS:+y}" "${CONCAT_HITS:+y}" "${HEX_HITS:+y}" "${DYN_REQUIRE_HITS:+y}" "${ENTROPY_HITS:+y}" "$OBFUSCATION_COUNT" \
+    "${BINARY_HITS:+y}" "${EXECUTABLE_HITS:+y}" \
     "$SENSITIVE_FIELDS" "$FILE_COUNT" "$TRUNCATED" "$VERSION"
   exit 0
 fi
@@ -789,8 +789,8 @@ print(json.dumps(data))
     "$TELEMETRY_FOUND" "$TELEMETRY_TYPE" "$TELEMETRY_OPTIN" "$TELEMETRY_BACKEND" \
     "$DOMAIN_LIST" "$HAS_KEYS" \
     "$DOTFILE_PATHS" "$SENSITIVE_READS" \
-    "$BASE64_HITS" "$CONCAT_HITS" "$HEX_HITS" "$DYN_REQUIRE_HITS" "$ENTROPY_HITS" "$OBFUSCATION_COUNT" \
-    "$BINARY_HITS" "$EXECUTABLE_HITS" \
+    "${BASE64_HITS:+y}" "${CONCAT_HITS:+y}" "${HEX_HITS:+y}" "${DYN_REQUIRE_HITS:+y}" "${ENTROPY_HITS:+y}" "$OBFUSCATION_COUNT" \
+    "${BINARY_HITS:+y}" "${EXECUTABLE_HITS:+y}" \
     "$SENSITIVE_FIELDS" "$FILE_COUNT" "$TRUNCATED" "$VERSION")
 
   python3 -c "
