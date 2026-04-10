@@ -2,7 +2,13 @@
 
 > Claude Code 第三方 skill 的安全掃描器 + PreToolUse 防火牆。
 
-在你安裝第三方 skill **之前**，偵測未揭露的 telemetry、外部資料外洩、可疑行為模式。
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+![Shell](https://img.shields.io/badge/language-Shell-blue)
+![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)
+![Tests](https://img.shields.io/badge/tests-27%20passed-brightgreen)
+![Version](https://img.shields.io/badge/version-0.2.0-blue)
+
+在你安裝第三方 skill **之前**，偵測未揭露的 telemetry、外部資料外洩、混淆程式碼、二進位 blob、以及可疑行為模式。
 
 起源於一起[真實事件](https://blog.chibakuma.com/ai-audit-gstack-telemetry-2/):一個熱門的 Claude Code skill 套件被發現會在使用者未同意的情況下偷偷記錄專案名稱——即使將 telemetry 設為「關閉」也一樣。
 
@@ -45,6 +51,9 @@ cd cc-skill-audit
 | Dotfile 寫入 | 在 skill 目錄外建立隱藏狀態目錄 |
 | 資料欄位 | repo、branch、session、hostname、conversation 等 |
 | 同意機制 | opt-in / disable_telemetry 旗標(存在會降低風險等級) |
+| **混淆偵測** | **Base64 編碼、字串拼接、hex/unicode 跳脫、動態 require/import、高 entropy 字串** |
+| **二進位偵測** | **ELF、Mach-O、PE32、WebAssembly 辨識；非腳本可執行檔** |
+| **依賴掃描** | **package.json postinstall 腳本、requirements.txt、node_modules 淺層掃描** |
 
 ## 風險等級
 
@@ -52,7 +61,9 @@ cd cc-skill-audit
 |------|------|-----------|
 | GREEN | 沒有可疑模式 | 允許 |
 | YELLOW | 有 telemetry 但看起來是 opt-in,或有網路呼叫但沒有 telemetry 關鍵字 | 詢問使用者 |
-| RED | 硬編碼金鑰、敏感讀取、未揭露 telemetry 加上外部呼叫 | 詢問使用者(可設定為阻擋) |
+| RED | 硬編碼金鑰、敏感讀取、未揭露 telemetry、混淆程式碼、二進位 blob | 詢問使用者(可設定為阻擋) |
+
+每次掃描還會產出一個 **severity score (0-100)** 提供更細緻的風險評估。
 
 ## 使用方式
 
@@ -67,6 +78,30 @@ cc-skill-audit /path/to/skill --json
 
 # 快速檢查(只看 exit code: 0=GREEN, 1=YELLOW, 2=RED)
 cc-skill-audit /path/to/skill --fast
+
+# SARIF 輸出(GitHub Code Scanning 相容)
+cc-skill-audit /path/to/skill --sarif
+
+# 比較兩次掃描差異(追蹤變更)
+cc-skill-audit /path/to/skill --json > scan-v1.json
+# ... skill 更新後 ...
+cc-skill-audit /path/to/skill --diff=scan-v1.json
+
+# 查看掃描歷史
+cc-skill-audit --history
+```
+
+### 白名單 / 黑名單
+
+```bash
+# 建立設定目錄
+mkdir -p ~/.config/cc-skill-audit
+
+# 信任已知安全的 skill(--fast 模式會跳過掃描)
+echo "my-trusted-skill" >> ~/.config/cc-skill-audit/allowlist.txt
+
+# 封鎖已知危險的 skill(永遠 RED)
+echo "evil-skill" >> ~/.config/cc-skill-audit/blocklist.txt
 ```
 
 ### PreToolUse Hook(自動)
@@ -78,6 +113,17 @@ cc-skill-audit /path/to/skill --fast
 ```bash
 export CC_SKILL_AUDIT_RED_ACTION=deny
 ```
+
+### GitHub Actions（CI/CD）
+
+cc-skill-audit 附帶現成的 GitHub Actions workflow。當 PR 新增或修改 `skills/` 或 `.claude/skills/` 下的檔案時，會自動：
+
+1. 掃描所有變更的 skill 目錄
+2. 上傳 SARIF 結果到 GitHub Code Scanning
+3. 在 PR 上留言風險評估
+4. 如果任何 skill 被評為 RED 則讓 check 失敗
+
+複製 `.github/workflows/skill-audit.yml` 到你的 repo 即可啟用。
 
 ### Claude Code Skill(可選)
 
@@ -92,7 +138,7 @@ export CC_SKILL_AUDIT_RED_ACTION=deny
 ```
 ## Skill Audit Report: suspicious-skill
 
-### Risk Level: YELLOW
+### Risk Level: YELLOW (Score: 20/100)
 
 ### Telemetry
 - Found: yes
@@ -111,6 +157,23 @@ export CC_SKILL_AUDIT_RED_ACTION=deny
 ### File System
 - Creates dotfiles: none
 - Reads sensitive paths: none
+
+### Obfuscation
+- Base64 encoding: no
+- String concatenation: no
+- Hex/Unicode escapes: no
+- Dynamic require/import: no
+- High-entropy strings: no
+- Techniques found: 0
+
+### Dependencies
+- Install scripts: none
+- Packages: none
+- Package files: none
+
+### Binary & Executables
+- Compiled binaries: none
+- Suspicious executables: none
 
 ### Recommendation
 install-with-caution
@@ -142,14 +205,28 @@ install-with-caution
          └────────┘    └────────┘    └────────┘
 ```
 
+## v0.2.0 新功能
+
+- **混淆偵測**：Base64 解碼、字串拼接、hex/unicode 跳脫、動態 require/import、Shannon entropy 分析
+- **二進位偵測**：透過 `file` 命令辨識 ELF/Mach-O/PE/WebAssembly
+- **依賴掃描**：package.json 生命週期腳本(postinstall)、requirements.txt、node_modules 淺層掃描
+- **SARIF 輸出**：GitHub Code Scanning 相容格式（`--sarif`）
+- **風險評分**：0-100 數字化分數搭配 GREEN/YELLOW/RED
+- **差異報告**：跨版本比較掃描結果（`--diff=prev.json`）
+- **掃描歷史**：本地 SQLite 資料庫追蹤所有掃描（`--history`）
+- **白名單/黑名單**：依名稱信任或封鎖 skill
+- **GitHub Actions**：現成 CI workflow 用於 PR 層級掃描
+- **安全 JSON**：透過 python3 json.dumps 修復注入風險
+
 ## 已知限制
 
-這是一個**基於 grep 的靜態掃描器**,不是沙箱。它無法偵測:
+這是一個**靜態掃描器**，不是沙箱。它無法偵測：
 
-- 混淆的程式碼(base64 編碼的 URL、動態字串組合)
-- 延遲執行(使用 N 次之後才啟動的 telemetry)
-- 依賴投毒(node_modules 中的惡意程式碼)
-- 二進位 blob
+- 延遲執行（使用 N 次之後才啟動的 telemetry）
+- 超越 top-level postinstall 的依賴投毒
+- 能擊敗 regex 偵測的重度混淆程式碼
+
+混淆偵測涵蓋常見技巧（base64、字串拼接、hex 跳脫、entropy 分析），但有決心的攻擊者仍可迴避靜態分析。
 
 完整的威脅模型請見 [docs/threat-model.md](docs/threat-model.md)。
 
