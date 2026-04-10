@@ -278,11 +278,20 @@ try:
     for s in suspicious:
         if s in scripts:
             print(f'{sys.argv[1]}:scripts.{s}: {scripts[s]}')
+except Exception:
+    pass
+" "$PKG_JSON" 2>/dev/null)
+  # Count dependencies separately (not mixed into POSTINSTALL_HITS)
+  DEP_HITS=$(python3 -c "
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        pkg = json.load(f)
     deps = {}
     deps.update(pkg.get('dependencies', {}))
     deps.update(pkg.get('devDependencies', {}))
     if deps:
-        print(f'DEPS:{len(deps)} packages')
+        print(f'package.json: {len(deps)} packages')
 except Exception:
     pass
 " "$PKG_JSON" 2>/dev/null)
@@ -675,14 +684,16 @@ with open(hits_file) as f:
             continue
         rule_id, level, msg, grep_line = parts
         # Parse grep output: file:linenum:content
-        gparts = grep_line.split(':', 2)
-        if len(gparts) >= 2 and gparts[1].strip().isdigit():
-            fpath = gparts[0]
+        # Use regex to handle filenames containing colons
+        import re
+        m = re.match(r'^(.+?):(\d+):', grep_line)
+        if m:
+            fpath = m.group(1)
             if fpath.startswith(target_prefix):
                 fpath = fpath[len(target_prefix):]
-            line_num = int(gparts[1].strip())
+            line_num = int(m.group(2))
         else:
-            fpath = gparts[0] if gparts else '(unknown)'
+            fpath = grep_line.split(':')[0] if ':' in grep_line else grep_line
             if fpath.startswith(target_prefix):
                 fpath = fpath[len(target_prefix):]
             line_num = 1
@@ -860,6 +871,7 @@ cat <<ENDREPORT
 
 ### Dependencies
 - Install scripts: $([ -n "$POSTINSTALL_HITS" ] && echo "yes (preinstall/postinstall detected)" || echo "none")
+- Packages: $([ -n "$DEP_HITS" ] && echo "$DEP_HITS" || echo "none")
 - Package files: $([ -f "$PKG_JSON" ] && echo "package.json" || echo "")$([ -f "$REQ_TXT" ] && echo " requirements.txt" || echo "")$([ ! -f "$PKG_JSON" ] && [ ! -f "$REQ_TXT" ] && echo "none" || echo "")
 
 ### Binary & Executables
