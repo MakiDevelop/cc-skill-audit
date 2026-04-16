@@ -143,9 +143,44 @@ fi
 trap 'rm -f "$FILES_TMP"' EXIT
 SCAN_ERRORS=0
 
+# Separately enumerate symlinks for reporting (they're excluded from the file list below)
+SYMLINK_HITS=$(find "$TARGET" \
+  \( -path '*/.git' -o -path '*/node_modules' -o -path '*/dist' -o -path '*/build' -o -path '*/coverage' \) -prune -o \
+  -type l -print 2>/dev/null | head -n 10)
+
+# Regular files, NUL-delimited to survive weird filenames
 find "$TARGET" \
   \( -path '*/.git' -o -path '*/node_modules' -o -path '*/dist' -o -path '*/build' -o -path '*/coverage' \) -prune -o \
-  -type f -print0 2>/dev/null | tr '\0' '\n' > "$FILES_TMP"
+  -type f -not -type l -print0 2>/dev/null > "${FILES_TMP}.nul"
+
+# Convert to newline-delimited, filtering out files whose names contain newline/CR
+# (such names are inherently suspicious and would break downstream grep pipelines).
+# Any filtered names are captured in $SUSPICIOUS_FILENAMES for reporting.
+SUSPICIOUS_FILENAMES=$(python3 - "${FILES_TMP}.nul" "$FILES_TMP" <<'PYEOF'
+import sys
+
+nul_path = sys.argv[1]
+out_path = sys.argv[2]
+suspicious = []
+with open(nul_path, "rb") as f:
+    data = f.read()
+with open(out_path, "w", encoding="utf-8", errors="replace") as w:
+    for chunk in data.split(b"\x00"):
+        if not chunk:
+            continue
+        try:
+            name = chunk.decode("utf-8")
+        except UnicodeDecodeError:
+            suspicious.append(repr(chunk))
+            continue
+        if "\n" in name or "\r" in name:
+            suspicious.append(repr(name))
+            continue
+        w.write(name + "\n")
+print("\n".join(suspicious))
+PYEOF
+)
+rm -f "${FILES_TMP}.nul"
 
 FILE_COUNT=$(wc -l < "$FILES_TMP" | tr -d ' ')
 if [ "$FILE_COUNT" -eq 0 ]; then
@@ -188,10 +223,12 @@ TELEMETRY_HITS=$(safe_grep "$TELEMETRY_PATTERN" 30)
 NETWORK_PATTERN='https?://|curl[[:space:]]|wget[[:space:]]|fetch[[:space:]]*\(|axios([.(]|[[:space:]])|XMLHttpRequest|sendBeacon|WebSocket|\.post\(|\.put\('
 NETWORK_HITS=$(safe_grep "$NETWORK_PATTERN" 30)
 
-# 3. URL extraction
+# 3. URL extraction (uses while-read to handle filenames with spaces/special chars)
 URLS=""
 if [ -n "$NETWORK_HITS" ]; then
-  URLS=$(xargs grep -hoE 'https?://[^"'"'"' )>]+' < "$FILES_TMP" 2>/dev/null \
+  URLS=$(while IFS= read -r file; do
+    [ -f "$file" ] && grep -hoE 'https?://[^"'"'"' )>]+' -- "$file" 2>/dev/null || true
+  done < "$FILES_TMP" \
     | sed 's/[",)\].]*$//' \
     | sort -u \
     | head -n 30 || true)
@@ -403,9 +440,24 @@ if [ -n "$BINARY_HITS" ]; then
   add_reason "compiled binary or executable blob detected"
 fi
 
+if [ -n "$SUSPICIOUS_FILENAMES" ]; then
+  RISK="RED"
+  add_reason "files with newline/control characters in names (likely scan evasion attempt)"
+fi
+
 if [ -n "$POSTINSTALL_HITS" ]; then
-  if [ "$RISK" != "RED" ]; then RISK="YELLOW"; fi
-  add_reason "install lifecycle scripts detected (preinstall/postinstall)"
+  if [ -n "$NETWORK_HITS" ] || [ -n "$TELEMETRY_HITS" ]; then
+    RISK="RED"
+    add_reason "install lifecycle scripts combined with network/telemetry (likely install-time payload)"
+  elif [ "$RISK" != "RED" ]; then
+    RISK="YELLOW"
+    add_reason "install lifecycle scripts detected (preinstall/postinstall)"
+  fi
+fi
+
+if [ -n "$SYMLINK_HITS" ]; then
+  if [ "$RISK" = "GREEN" ]; then RISK="YELLOW"; fi
+  add_reason "contains symlinks (review targets before install)"
 fi
 
 if [ -n "$EXECUTABLE_HITS" ] && [ -z "$BINARY_HITS" ]; then

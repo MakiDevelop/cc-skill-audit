@@ -136,18 +136,25 @@ emit_decision() {
   local decision="$1"
   local reason="$2"
 
-  python3 -c "
+  # Pass values as sys.argv, never interpolate into the -c string
+  # (prevents Python injection via attacker-controlled skill names)
+  python3 - "$decision" "$reason" <<'PYEOF' 2>/dev/null
 import json
+import sys
+
+decision = sys.argv[1]
+reason = sys.argv[2]
+
 print(json.dumps({
-    'hookSpecificOutput': {
-        'hookEventName': 'PreToolUse',
-        'permissionDecision': '$decision',
-        'permissionDecisionReason': '$reason'
+    "hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": decision,
+        "permissionDecisionReason": reason,
     },
-    'systemMessage': '$reason',
-    'suppressOutput': True
+    "systemMessage": reason,
+    "suppressOutput": True,
 }))
-" 2>/dev/null
+PYEOF
 }
 
 if [ -z "$SOURCE_DIR" ]; then
@@ -156,6 +163,7 @@ if [ -z "$SOURCE_DIR" ]; then
 fi
 
 # Run CLI in fast mode (with timeout fallback for macOS)
+# Note: timeout(1) returns 124 when it kills the child; perl's alarm returns 142 (128+SIGALRM)
 if command -v timeout >/dev/null 2>&1; then
   timeout 3 "$CLI" "$SOURCE_DIR" --fast 2>/dev/null
   EXIT_CODE=$?
@@ -165,6 +173,13 @@ elif command -v perl >/dev/null 2>&1; then
 else
   "$CLI" "$SOURCE_DIR" --fast 2>/dev/null
   EXIT_CODE=$?
+fi
+
+# Distinguish timeout (124/142) from genuine scan error for the user-facing message
+if [ "$EXIT_CODE" -eq 124 ] || [ "$EXIT_CODE" -eq 142 ]; then
+  TIMED_OUT=1
+else
+  TIMED_OUT=0
 fi
 
 RED_ACTION="${CC_SKILL_AUDIT_RED_ACTION:-ask}"
@@ -183,6 +198,10 @@ case $EXIT_CODE in
     emit_decision "$RED_ACTION" "SKILL AUDIT [RED] $SKILL_NAME — suspicious patterns detected! Run: cc-skill-audit $SOURCE_DIR"
     ;;
   *)  # Error or timeout
-    emit_decision "ask" "SKILL AUDIT [YELLOW] scan error or timeout — review before install"
+    if [ "$TIMED_OUT" = "1" ]; then
+      emit_decision "ask" "SKILL AUDIT [YELLOW] scan timed out (>3s) — large or slow skill, review manually before install"
+    else
+      emit_decision "ask" "SKILL AUDIT [YELLOW] scan error (exit $EXIT_CODE) — review before install"
+    fi
     ;;
 esac

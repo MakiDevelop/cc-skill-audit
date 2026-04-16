@@ -76,14 +76,18 @@ HOOK_CMD="bash $SCRIPTS_DIR/pre-install-guard.sh"
 if [ -f "$SETTINGS" ] && grep -q "pre-install-guard" "$SETTINGS" 2>/dev/null; then
   echo "  Hook already present in settings.json — skipping."
 else
-  python3 -c "
-import json, sys
+  # Pass values as sys.argv (prevents injection if env vars contain quotes)
+  python3 - "$SETTINGS" "$HOOK_CMD" <<'PYEOF'
+import json
+import os
+import sys
 
-settings_path = '$SETTINGS'
+settings_path = sys.argv[1]
+hook_cmd = sys.argv[2]
 hook_entry = {
-    'type': 'command',
-    'command': '$HOOK_CMD',
-    'timeout': 3
+    "type": "command",
+    "command": hook_cmd,
+    "timeout": 3,
 }
 
 try:
@@ -92,21 +96,31 @@ try:
 except FileNotFoundError:
     settings = {}
 except json.JSONDecodeError:
-    print('  ERROR: settings.json is malformed — refusing to overwrite. Fix it manually.', file=sys.stderr)
+    print("  ERROR: settings.json is malformed — refusing to overwrite. Fix it manually.", file=sys.stderr)
     sys.exit(1)
 
-hooks = settings.setdefault('hooks', {})
-pre_tool = hooks.setdefault('PreToolUse', [])
+hooks = settings.setdefault("hooks", {})
+pre_tool = hooks.setdefault("PreToolUse", [])
 
 # Avoid duplicates
-if not any('pre-install-guard' in str(h.get('command', '')) for h in pre_tool):
+if not any("pre-install-guard" in str(h.get("command", "")) for h in pre_tool):
     pre_tool.append(hook_entry)
 
-with open(settings_path, 'w') as f:
-    json.dump(settings, f, indent=2)
-
-print('  Hook added to settings.json')
-" 2>/dev/null
+# Atomic write via temp file + rename
+tmp_path = settings_path + ".tmp"
+try:
+    with open(tmp_path, "w") as f:
+        json.dump(settings, f, indent=2)
+    os.replace(tmp_path, settings_path)
+    print("  Hook added to settings.json")
+except Exception as e:
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+    print(f"  ERROR: failed to write settings.json: {e}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
 fi
 
 # Install /audit-skill (optional Claude Code skill)
