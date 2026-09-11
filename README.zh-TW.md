@@ -1,5 +1,7 @@
 # cc-skill-audit
 
+> **狀態（2026-09-11）：** 凍結在 0.2.0。日常掃本機 skill 目錄請用 Claude Code skill `/audit-skill`。本 CLI / PreToolUse 掃描器是最後一版獨立發佈；這裡不再開新 detector。
+
 > Claude Code 第三方 skill 的安全掃描器 + PreToolUse 防火牆。
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)

@@ -1,5 +1,7 @@
 # cc-skill-audit
 
+> **Status (2026-09-11):** Frozen at 0.2.0. Daily path for auditing a local skill folder is the Claude Code skill `/audit-skill`. This CLI / PreToolUse scanner is the last published standalone release; no new detectors are planned here.
+
 > Security scanner & PreToolUse firewall for Claude Code third-party skills.
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
